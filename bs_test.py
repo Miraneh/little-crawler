@@ -2,12 +2,16 @@ import datetime
 import json
 import requests
 from bs4 import BeautifulSoup as bs
-import pandas as pd, numpy as np
-from pandas.io.json import json_normalize
+import pandas as pd
 import time
 
+instagram_pages = ["nike", "adidas", "instagram", "neymarjr", "natgeo", "therock", "leomessi", "caistudio",
+                   "takashipom",
+                   "artistgeorgecondo", "kaws", "aiww", "obeygiant", "pauloctavious", "osgemeos", "kennyscharf",
+                   "mayabeano", "jr", "artbymoga", "sarahandersencomics"]
 
-def parse_data(data):
+
+def get_post_links(data):
     links = []
     body = data.find('body')
     script = body.find('script', text=lambda t: t.startswith('window._sharedData'))
@@ -18,8 +22,9 @@ def parse_data(data):
     return links
 
 
-def create_df(s: requests.session(), links: []):
-    information = pd.DataFrame(columns=['Account', 'Post Link', 'Caption', 'Post Type', 'Comments', 'View', 'Video Duration'])
+def extract_data_from_posts(s: requests.session(), links: []):
+    information = pd.DataFrame(
+        columns=['Account', 'Post Link', 'Caption', 'Post Type', 'Comments', 'View', 'Video Duration'])
     for i in range(len(links)):
         time.sleep(1)
         print(links[i])
@@ -29,39 +34,53 @@ def create_df(s: requests.session(), links: []):
         for j in range(10):
             try:
                 post = s.get(links[i])
-                post_data = bs(post.text, 'html.parser')
-                post_title = post_data.title.text
-                username = post_title.split()[0]
-                body = post_data.find('body')
+                post_html_data = bs(post.text, 'html.parser')
+                post_title = post_html_data.title.text
+                print(post_title)
+
+                caption = ""
+                for k in range(len(post_title)):
+                    if post_title[k] == '“':
+                        caption = post_title[k:-1]
+                        break
+
+                body = post_html_data.find('body')
                 scripts = body.find_all('script')
 
-                for element in scripts:
-                    if 'window.__additionalDataLoaded' in element.text:
-                        post_script = element.text
+                for scr in scripts:
+                    if 'window.__additionalDataLoaded' in scr.text:
+                        post_script = scr.text
                         break
 
                 for k in range(len(post_script)):
                     if post_script[k] == '{':
-                        json_text = post_script[k:-2]
+                        detail_text = post_script[k:-2]
                         break
-                
-                print(json_text)
-                json_data = json.loads(json_text)
-                if json_data['graphql']['shortcode_media']['__typename'] == 'GraphImage':
+
+                json_data = json.loads(detail_text)
+                post_kind = json_data['graphql']['shortcode_media']['__typename']
+
+                if post_kind == 'GraphImage':
                     post_type = 'image'
                     view = None
                     video_duration = 0
-                    comments = json_data['graphql']['shortcode_media']['edge_media_to_parent_comment']
-                elif json_data['graphql']['shortcode_media']['__typename'] == 'GraphVideo':
+                    comments = json_data['graphql']['shortcode_media']['edge_media_to_parent_comment']['count']
+                elif post_kind == 'GraphVideo':
                     post_type = 'video'
                     view = json_data['graphql']['shortcode_media']['video_view_count']
                     video_duration = json_data['graphql']['shortcode_media']['video_duration']
-                    comments = json_data['graphql']['shortcode_media']['edge_media_to_parent_comment']
-                else:
-                    continue
+                    comments = json_data['graphql']['shortcode_media']['edge_media_to_parent_comment']['count']
+                elif post_kind == 'GraphSidecar':
+                    post_type = 'collection'
+                    view = None
+                    video_duration = 0
+                    comments = json_data['graphql']['shortcode_media']['edge_media_to_parent_comment']['count']
 
-                row = pd.DataFrame({"Account": username, "Post Link": links[i], "Caption": post_title, "Post Type": post_type, "Comments": comments,
-                                    "View" : view, "Video Duration": video_duration})
+                username = json_data['graphql']['shortcode_media']['owner']['username']
+                row = pd.DataFrame(
+                    {"Account": [username], "Post Link": [links[i]], "Caption": [caption], "Post Type": [post_type],
+                     "Comments": [comments],
+                     "View": [view], "Video Duration": [video_duration]})
                 print("ROW: ", row)
                 information = information.append(row, ignore_index=True)
                 break
@@ -69,9 +88,22 @@ def create_df(s: requests.session(), links: []):
                 print(e)
                 print("retying in 10 seconds...")
                 time.sleep(10)
-    #information = information.drop_duplicates(subset='shortcode')
-    #information.index = range(len(information.index))
+
     information.to_csv(r"{}.csv".format(username))
+    print("Creation Completed.")
+
+
+def start_crawling(s: requests.session):
+    for ig_page in instagram_pages:
+        url = "https://www.instagram.com/{}".format(ig_page)
+        data_received = s.get(url)
+        bs_page = bs(data_received.text, "html.parser")
+        title = bs_page.title
+
+        print(title.text)
+        links = get_post_links(bs_page)
+        print("Links: ", links)
+        extract_data_from_posts(s, links)
 
 
 def login(username, password):
@@ -87,11 +119,10 @@ def login(username, password):
                 csrf = response.cookies['csrftoken']
                 break
             except Exception as e:
-                print("retry...")
+                print("Connecting to login page failed. Retrying... (if it takes too long you might want to rerun)")
 
-        """response = s.get(link)
-        csrf = response.cookies['csrftoken']"""
-        print(csrf)
+        print("Connected to login page. We'll login now...")
+
         payload = {
             'username': username,
             'enc_password': f'#PWD_INSTAGRAM_BROWSER:0:{time}:{password}',
@@ -124,19 +155,9 @@ def login(username, password):
         else:
             print("login failed ", login_response.text)
 
-        url = "https://www.instagram.com/{}".format("adidas")
-        data_received = s.get(url)
-        bs_data = bs(data_received.text, "html.parser")
-        title = bs_data.title
-        # rep = bs_data.find('meta', property='og:description').attrs["content"]
-
-        print(title.text)
-        # print(rep)
-        links = parse_data(bs_data)
-        print("Links: ", links)
-        create_df(s, links)
+        start_crawling(s)
 
 
-# username = input("Enter your username: ")
-# password = input("Enter your password: ")
-login("mehranehn", "Passinsta174*")
+user_name = input("Enter your username: ")
+pass_word = input("Enter your password: ")
+login(user_name, pass_word)
